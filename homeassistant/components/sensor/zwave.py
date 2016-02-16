@@ -17,7 +17,7 @@ from homeassistant.helpers.entity import Entity
 from homeassistant.components.zwave import (
     NETWORK, ATTR_NODE_ID, ATTR_VALUE_ID, COMMAND_CLASS_SENSOR_BINARY,
     COMMAND_CLASS_SENSOR_MULTILEVEL, COMMAND_CLASS_METER, TYPE_DECIMAL,
-    COMMAND_CLASS_ALARM, ZWaveDeviceEntity, get_config_value)
+    COMMAND_CLASS_ALARM, COMMAND_CLASS_BASIC, ZWaveDeviceEntity, get_config_value)
 
 from homeassistant.const import (
     STATE_ON, STATE_OFF, TEMP_CELCIUS, TEMP_FAHRENHEIT)
@@ -92,7 +92,9 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
 
     elif value.command_class == COMMAND_CLASS_ALARM:
         add_devices([ZWaveAlarmSensor(value)])
-
+        
+    elif value.command_class == COMMAND_CLASS_BASIC:
+        add_devices([ZWaveBasicSensor(value)])
 
 class ZWaveSensor(ZWaveDeviceEntity, Entity):
     """ Represents a Z-Wave sensor. """
@@ -212,4 +214,10 @@ class ZWaveAlarmSensor(ZWaveSensor):
     COMMAND_CLASS_ALARM is what we get here.
     """
     # Empty subclass for now. Allows for later customizations
+    pass
+
+class ZWaveBasicSensor(ZWaveSensor):
+    """
+    Handles COMMAND_CLASS_BASIC for devices that send nothing else
+    """
     pass
