@@ -6,13 +6,15 @@ https://home-assistant.io/components/media_player.sonos/
 """
 import datetime
 import logging
+import socket
 
 from homeassistant.components.media_player import (
     MEDIA_TYPE_MUSIC, SUPPORT_NEXT_TRACK, SUPPORT_PAUSE,
-    SUPPORT_PREVIOUS_TRACK, SUPPORT_SEEK, SUPPORT_VOLUME_MUTE,
-    SUPPORT_VOLUME_SET, MediaPlayerDevice)
+    SUPPORT_PLAY_MEDIA, SUPPORT_PREVIOUS_TRACK, SUPPORT_SEEK,
+    SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_SET,
+    MediaPlayerDevice)
 from homeassistant.const import (
-    STATE_IDLE, STATE_PAUSED, STATE_PLAYING, STATE_UNKNOWN)
+    STATE_IDLE, STATE_PAUSED, STATE_PLAYING, STATE_UNKNOWN, STATE_OFF)
 
 REQUIREMENTS = ['SoCo==0.11.1']
 
@@ -27,18 +29,21 @@ _REQUESTS_LOGGER = logging.getLogger('requests')
 _REQUESTS_LOGGER.setLevel(logging.ERROR)
 
 SUPPORT_SONOS = SUPPORT_PAUSE | SUPPORT_VOLUME_SET | SUPPORT_VOLUME_MUTE |\
-    SUPPORT_PREVIOUS_TRACK | SUPPORT_NEXT_TRACK | SUPPORT_SEEK
+    SUPPORT_PREVIOUS_TRACK | SUPPORT_NEXT_TRACK | SUPPORT_PLAY_MEDIA |\
+    SUPPORT_SEEK
 
 
 # pylint: disable=unused-argument
 def setup_platform(hass, config, add_devices, discovery_info=None):
     """Setup the Sonos platform."""
     import soco
-    import socket
 
     if discovery_info:
-        add_devices([SonosDevice(hass, soco.SoCo(discovery_info))])
-        return True
+        player = soco.SoCo(discovery_info)
+        if player.is_visible:
+            add_devices([SonosDevice(hass, player)])
+            return True
+        return False
 
     players = None
     hosts = config.get('hosts', None)
@@ -92,6 +97,7 @@ class SonosDevice(MediaPlayerDevice):
     def __init__(self, hass, player):
         """Initialize the Sonos device."""
         self.hass = hass
+        self.volume_increment = 5
         super(SonosDevice, self).__init__()
         self._player = player
         self.update()
@@ -135,9 +141,14 @@ class SonosDevice(MediaPlayerDevice):
         """Retrieve latest state."""
         self._name = self._player.get_speaker_info()['zone_name'].replace(
             ' (R)', '').replace(' (L)', '')
-        self._status = self._player.get_current_transport_info().get(
-            'current_transport_state')
-        self._trackinfo = self._player.get_current_track_info()
+
+        if self.available:
+            self._status = self._player.get_current_transport_info().get(
+                'current_transport_state')
+            self._trackinfo = self._player.get_current_track_info()
+        else:
+            self._status = STATE_OFF
+            self._trackinfo = {}
 
     @property
     def volume_level(self):
@@ -195,34 +206,30 @@ class SonosDevice(MediaPlayerDevice):
         """Flag of media commands that are supported."""
         return SUPPORT_SONOS
 
+    def volume_up(self):
+        """Volume up media player."""
+        self._player.volume += self.volume_increment
+
+    def volume_down(self):
+        """Volume down media player."""
+        self._player.volume -= self.volume_increment
+
+    def set_volume_level(self, volume):
+        """Set volume level, range 0..1."""
+        self._player.volume = str(int(volume * 100))
+
+    def mute_volume(self, mute):
+        """Mute (true) or unmute (false) media player."""
+        self._player.mute = mute
+
     @only_if_coordinator
     def turn_off(self):
         """Turn off media player."""
         self._player.pause()
 
     @only_if_coordinator
-    def volume_up(self):
-        """Volume up media player."""
-        self._player.volume += 1
-
-    @only_if_coordinator
-    def volume_down(self):
-        """Volume down media player."""
-        self._player.volume -= 1
-
-    @only_if_coordinator
-    def set_volume_level(self, volume):
-        """Set volume level, range 0..1."""
-        self._player.volume = str(int(volume * 100))
-
-    @only_if_coordinator
-    def mute_volume(self, mute):
-        """Mute (true) or unmute (false) media player."""
-        self._player.mute = mute
-
-    @only_if_coordinator
     def media_play(self):
-        """Send paly command."""
+        """Send play command."""
         self._player.play()
 
     @only_if_coordinator
@@ -249,3 +256,20 @@ class SonosDevice(MediaPlayerDevice):
     def turn_on(self):
         """Turn the media player on."""
         self._player.play()
+
+    @only_if_coordinator
+    def play_media(self, media_type, media_id):
+        """Send the play_media command to the media player."""
+        self._player.play_uri(media_id)
+
+    @property
+    def available(self):
+        """Return True if player is reachable, False otherwise."""
+        try:
+            sock = socket.create_connection(
+                address=(self._player.ip_address, 1443),
+                timeout=3)
+            sock.close()
+            return True
+        except socket.error:
+            return False

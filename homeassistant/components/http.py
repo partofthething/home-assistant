@@ -5,9 +5,9 @@ For more details about the RESTful API, please refer to the documentation at
 https://home-assistant.io/developers/api/
 """
 import gzip
+import hmac
 import json
 import logging
-import os
 import ssl
 import threading
 import time
@@ -28,7 +28,7 @@ from homeassistant.const import (
     HTTP_HEADER_CONTENT_LENGTH, HTTP_HEADER_CONTENT_TYPE, HTTP_HEADER_EXPIRES,
     HTTP_HEADER_HA_AUTH, HTTP_HEADER_VARY, HTTP_METHOD_NOT_ALLOWED,
     HTTP_NOT_FOUND, HTTP_OK, HTTP_UNAUTHORIZED, HTTP_UNPROCESSABLE_ENTITY,
-    SERVER_PORT)
+    SERVER_PORT, URL_ROOT, URL_API_EVENT_FORWARD)
 
 DOMAIN = "http"
 
@@ -74,10 +74,13 @@ def setup(hass, config):
     hass.bus.listen_once(
         ha.EVENT_HOMEASSISTANT_START,
         lambda event:
-        threading.Thread(target=server.start, daemon=True).start())
+        threading.Thread(target=server.start, daemon=True,
+                         name='HTTP-server').start())
 
     hass.http = server
-    hass.config.api = rem.API(util.get_local_ip(), api_password, server_port,
+    hass.config.api = rem.API(server_host if server_host != '0.0.0.0'
+                              else util.get_local_ip(),
+                              api_password, server_port,
                               ssl_certificate is not None)
 
     return True
@@ -163,6 +166,7 @@ class RequestHandler(SimpleHTTPRequestHandler):
         # Track if this was an authenticated request
         self.authenticated = False
         SimpleHTTPRequestHandler.__init__(self, req, client_addr, server)
+        self.protocol_version = 'HTTP/1.1'
 
     def log_message(self, fmt, *arguments):
         """Redirect built-in log to HA logging."""
@@ -197,12 +201,26 @@ class RequestHandler(SimpleHTTPRequestHandler):
                     "Error parsing JSON", HTTP_UNPROCESSABLE_ENTITY)
                 return
 
-        self.authenticated = (self.server.api_password is None or
-                              self.headers.get(HTTP_HEADER_HA_AUTH) ==
-                              self.server.api_password or
-                              data.get(DATA_API_PASSWORD) ==
-                              self.server.api_password or
-                              self.verify_session())
+        if self.verify_session():
+            # The user has a valid session already
+            self.authenticated = True
+        elif self.server.api_password is None:
+            # No password is set, so everyone is authenticated
+            self.authenticated = True
+        elif hmac.compare_digest(self.headers.get(HTTP_HEADER_HA_AUTH, ''),
+                                 self.server.api_password):
+            # A valid auth header has been set
+            self.authenticated = True
+        elif hmac.compare_digest(data.get(DATA_API_PASSWORD, ''),
+                                 self.server.api_password):
+            # A valid password has been specified
+            self.authenticated = True
+        else:
+            self.authenticated = False
+
+        # we really shouldn't need to forward the password from here
+        if url.path not in [URL_ROOT, URL_API_EVENT_FORWARD]:
+            data.pop(DATA_API_PASSWORD, None)
 
         if '_METHOD' in data:
             method = data.pop('_METHOD')
@@ -236,9 +254,12 @@ class RequestHandler(SimpleHTTPRequestHandler):
         # Did we find a handler for the incoming request?
         if handle_request_method:
             # For some calls we need a valid password
+            msg = "API password missing or incorrect."
             if require_auth and not self.authenticated:
-                self.write_json_message(
-                    "API password missing or incorrect.", HTTP_UNAUTHORIZED)
+                self.write_json_message(msg, HTTP_UNAUTHORIZED)
+                _LOGGER.warning('%s Source IP: %s',
+                                msg,
+                                self.client_address[0])
                 return
 
             handle_request_method(self, path_match, data)
@@ -277,31 +298,24 @@ class RequestHandler(SimpleHTTPRequestHandler):
 
     def write_json(self, data=None, status_code=HTTP_OK, location=None):
         """Helper method to return JSON to the caller."""
+        json_data = json.dumps(data, indent=4, sort_keys=True,
+                               cls=rem.JSONEncoder).encode('UTF-8')
         self.send_response(status_code)
-        self.send_header(HTTP_HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
 
         if location:
             self.send_header('Location', location)
 
         self.set_session_cookie_header()
 
-        self.end_headers()
-
-        if data is not None:
-            self.wfile.write(
-                json.dumps(data, indent=4, sort_keys=True,
-                           cls=rem.JSONEncoder).encode("UTF-8"))
+        self.write_content(json_data, CONTENT_TYPE_JSON)
 
     def write_text(self, message, status_code=HTTP_OK):
         """Helper method to return a text message to the caller."""
+        msg_data = message.encode('UTF-8')
         self.send_response(status_code)
-        self.send_header(HTTP_HEADER_CONTENT_TYPE, CONTENT_TYPE_TEXT_PLAIN)
-
         self.set_session_cookie_header()
 
-        self.end_headers()
-
-        self.wfile.write(message.encode("UTF-8"))
+        self.write_content(msg_data, CONTENT_TYPE_TEXT_PLAIN)
 
     def write_file(self, path, cache_headers=True):
         """Return a file to the user."""
@@ -317,36 +331,32 @@ class RequestHandler(SimpleHTTPRequestHandler):
 
     def write_file_pointer(self, content_type, inp, cache_headers=True):
         """Helper function to write a file pointer to the user."""
-        do_gzip = 'gzip' in self.headers.get(HTTP_HEADER_ACCEPT_ENCODING, '')
-
         self.send_response(HTTP_OK)
-        self.send_header(HTTP_HEADER_CONTENT_TYPE, content_type)
 
         if cache_headers:
             self.set_cache_header()
         self.set_session_cookie_header()
 
-        if do_gzip:
-            gzip_data = gzip.compress(inp.read())
+        self.write_content(inp.read(), content_type)
+
+    def write_content(self, content, content_type=None):
+        """Helper method to write content bytes to output stream."""
+        if content_type is not None:
+            self.send_header(HTTP_HEADER_CONTENT_TYPE, content_type)
+
+        if 'gzip' in self.headers.get(HTTP_HEADER_ACCEPT_ENCODING, ''):
+            content = gzip.compress(content)
 
             self.send_header(HTTP_HEADER_CONTENT_ENCODING, "gzip")
             self.send_header(HTTP_HEADER_VARY, HTTP_HEADER_ACCEPT_ENCODING)
-            self.send_header(HTTP_HEADER_CONTENT_LENGTH, str(len(gzip_data)))
 
-        else:
-            fst = os.fstat(inp.fileno())
-            self.send_header(HTTP_HEADER_CONTENT_LENGTH, str(fst[6]))
-
+        self.send_header(HTTP_HEADER_CONTENT_LENGTH, str(len(content)))
         self.end_headers()
 
         if self.command == 'HEAD':
             return
 
-        elif do_gzip:
-            self.wfile.write(gzip_data)
-
-        else:
-            self.copyfile(inp, self.wfile)
+        self.wfile.write(content)
 
     def set_cache_header(self):
         """Add cache headers if not in development."""

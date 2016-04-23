@@ -6,25 +6,32 @@ at https://home-assistant.io/components/automation/#template-trigger
 """
 import logging
 
-from homeassistant.const import CONF_VALUE_TEMPLATE, EVENT_STATE_CHANGED
+import voluptuous as vol
+
+from homeassistant.const import (
+    CONF_VALUE_TEMPLATE, CONF_PLATFORM, MATCH_ALL)
 from homeassistant.exceptions import TemplateError
 from homeassistant.helpers import template
+from homeassistant.helpers.event import track_state_change
+import homeassistant.helpers.config_validation as cv
+
 
 _LOGGER = logging.getLogger(__name__)
+
+TRIGGER_SCHEMA = IF_ACTION_SCHEMA = vol.Schema({
+    vol.Required(CONF_PLATFORM): 'template',
+    vol.Required(CONF_VALUE_TEMPLATE): cv.template,
+})
 
 
 def trigger(hass, config, action):
     """Listen for state changes based on configuration."""
     value_template = config.get(CONF_VALUE_TEMPLATE)
 
-    if value_template is None:
-        _LOGGER.error("Missing configuration key %s", CONF_VALUE_TEMPLATE)
-        return False
-
     # Local variable to keep track of if the action has already been triggered
     already_triggered = False
 
-    def event_listener(event):
+    def state_changed_listener(entity_id, from_s, to_s):
         """Listen for state changes and calls action."""
         nonlocal already_triggered
         template_result = _check_template(hass, value_template)
@@ -32,11 +39,18 @@ def trigger(hass, config, action):
         # Check to see if template returns true
         if template_result and not already_triggered:
             already_triggered = True
-            action()
+            action({
+                'trigger': {
+                    'platform': 'template',
+                    'entity_id': entity_id,
+                    'from_state': from_s,
+                    'to_state': to_s,
+                },
+            })
         elif not template_result:
             already_triggered = False
 
-    hass.bus.listen(EVENT_STATE_CHANGED, event_listener)
+    track_state_change(hass, MATCH_ALL, state_changed_listener)
     return True
 
 
@@ -44,19 +58,21 @@ def if_action(hass, config):
     """Wrap action method with state based condition."""
     value_template = config.get(CONF_VALUE_TEMPLATE)
 
-    if value_template is None:
-        _LOGGER.error("Missing configuration key %s", CONF_VALUE_TEMPLATE)
-        return False
-
-    return lambda: _check_template(hass, value_template)
+    return lambda variables: _check_template(hass, value_template,
+                                             variables=variables)
 
 
-def _check_template(hass, value_template):
+def _check_template(hass, value_template, variables=None):
     """Check if result of template is true."""
     try:
-        value = template.render(hass, value_template, {})
-    except TemplateError:
-        _LOGGER.exception('Error parsing template')
+        value = template.render(hass, value_template, variables)
+    except TemplateError as ex:
+        if ex.args and ex.args[0].startswith(
+                "UndefinedError: 'None' has no attribute"):
+            # Common during HA startup - so just a warning
+            _LOGGER.warning(ex)
+        else:
+            _LOGGER.error(ex)
         return False
 
     return value.lower() == 'true'
