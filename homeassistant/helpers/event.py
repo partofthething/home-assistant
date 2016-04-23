@@ -53,7 +53,7 @@ def track_state_change(hass, entity_ids, action, from_state=None,
 
 
 def track_point_in_time(hass, action, point_in_time):
-    """Add a listener that fires once after a spefic point in time."""
+    """Add a listener that fires once after a specific point in time."""
     utc_point_in_time = dt_util.as_utc(point_in_time)
 
     @ft.wraps(action)
