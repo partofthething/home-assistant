@@ -45,8 +45,9 @@ DISCOVER_THERMOSTATS = 'zwave.thermostat'
 
 EVENT_SCENE_ACTIVATED = "zwave.scene_activated"
 
+# The Zwave standard defines many different COMMAND_CLASSes. Each device supports one or more 
+# of these. Defined below are the COMMAND_CLASSes that will be discovered by home-assistant. 
 COMMAND_CLASS_SWITCH_MULTILEVEL = 38
-
 COMMAND_CLASS_SWITCH_BINARY = 37
 COMMAND_CLASS_SENSOR_BINARY = 48
 COMMAND_CLASS_SENSOR_MULTILEVEL = 49
@@ -65,7 +66,7 @@ TYPE_DECIMAL = "Decimal"
 
 
 # List of tuple (DOMAIN, discovered service, supported command classes,
-# value type).
+# value type, genre).
 DISCOVERY_COMPONENTS = [
     ('sensor',
      DISCOVER_SENSORS,
@@ -210,6 +211,39 @@ def setup(hass, config):
 
     def value_added(node, value):
         """Called when a value is added to a node on the network."""
+        discovered = _find_supported_component(node, value)
+        if discovered is None:
+            return
+        else:
+            component, discovery_service = discovered
+
+        # Ensure component is loaded
+        bootstrap.setup_component(hass, component, config)
+
+        # Configure node
+        name = "{}.{}".format(component, _object_id(value))
+
+        node_config = customize.get(name, {})
+        polling_intensity = convert(
+            node_config.get(CONF_POLLING_INTENSITY), int)
+        if polling_intensity:
+            value.enable_poll(polling_intensity)
+        else:
+            value.disable_poll()
+
+        # Fire discovery event
+        hass.bus.fire(EVENT_PLATFORM_DISCOVERED, {
+            ATTR_SERVICE: discovery_service,
+            ATTR_DISCOVERED: {
+                ATTR_NODE_ID: node.node_id,
+                ATTR_VALUE_ID: value.value_id,
+            }
+        })
+
+    def _find_supported_component(node, value):
+        """
+        Match info from the Zwave network with the list of supported platforms
+        """
         for (component,
              discovery_service,
              command_ids,
@@ -222,29 +256,14 @@ def setup(hass, config):
                 continue
             if value_genre is not None and value_genre != value.genre:
                 continue
-
-            # Ensure component is loaded
-            bootstrap.setup_component(hass, component, config)
-
-            # Configure node
-            name = "{}.{}".format(component, _object_id(value))
-
-            node_config = customize.get(name, {})
-            polling_intensity = convert(
-                node_config.get(CONF_POLLING_INTENSITY), int)
-            if polling_intensity:
-                value.enable_poll(polling_intensity)
-            else:
-                value.disable_poll()
-
-            # Fire discovery event
-            hass.bus.fire(EVENT_PLATFORM_DISCOVERED, {
-                ATTR_SERVICE: discovery_service,
-                ATTR_DISCOVERED: {
-                    ATTR_NODE_ID: node.node_id,
-                    ATTR_VALUE_ID: value.value_id,
-                }
-            })
+            
+            break
+        else:
+            _LOGGER.info('ZWave device {} with COMMAND_CLASS {} is not supported'
+                         ''.format(value, value.command_class))
+            return None
+            
+        return component, discovery_service
 
     def scene_activated(node, scene_id):
         """Called when a scene is activated on any node in the network."""
@@ -336,7 +355,8 @@ class ZWaveDeviceEntity:
         """Initialize the z-Wave device."""
         self._value = value
         self.entity_id = "{}.{}".format(domain, self._object_id())
-
+        _LOGGER.debug('Initialized new {} with value: {}'.format(self.__class__.__name__, self._value))
+        
     @property
     def should_poll(self):
         """No polling needed."""
