@@ -130,12 +130,14 @@ RENAME_NODE_SCHEMA = vol.Schema({
     vol.Required(ATTR_ENTITY_ID): cv.entity_id,
     vol.Required(const.ATTR_NAME): cv.string,
 })
+
 SET_CONFIG_PARAMETER_SCHEMA = vol.Schema({
     vol.Required(const.ATTR_NODE_ID): vol.Coerce(int),
     vol.Required(const.ATTR_CONFIG_PARAMETER): vol.Coerce(int),
     vol.Required(const.ATTR_CONFIG_VALUE): vol.Coerce(int),
     vol.Optional(const.ATTR_CONFIG_SIZE): vol.Coerce(int)
 })
+
 PRINT_CONFIG_PARAMETER_SCHEMA = vol.Schema({
     vol.Required(const.ATTR_NODE_ID): vol.Coerce(int),
     vol.Required(const.ATTR_CONFIG_PARAMETER): vol.Coerce(int),
@@ -157,6 +159,10 @@ CUSTOMIZE_SCHEMA = vol.Schema({
         cv.boolean,
     vol.Optional(CONF_REFRESH_DELAY, default=DEFAULT_CONF_REFRESH_DELAY):
         cv.positive_int
+})
+
+SET_POLLING_INTERVAL_SCHEMA = vol.Schema({
+    vol.Required(CONF_POLLING_INTERVAL): vol.Coerce(int),
 })
 
 CONFIG_SCHEMA = vol.Schema({
@@ -236,6 +242,14 @@ def get_config_value(node, value_index):
         # If we get an runtime error the dict has changed while
         # we was looking for a value, just do it again
         return get_config_value(node, value_index)
+
+def _set_polling_interval(interval_milliseconds):
+    """Set the polling interval."""
+    interval_milliseconds = convert(interval_milliseconds, int)
+    if interval_milliseconds is not None:
+        NETWORK.set_poll_interval(interval_milliseconds, False)
+    poll_interval = NETWORK.get_poll_interval()
+    _LOGGER.info("zwave polling interval set to %d ms", poll_interval)
 
 
 # pylint: disable=R0914
@@ -457,6 +471,11 @@ def setup(hass, config):
         _LOGGER.info(
             "Renamed ZWave node %d to %s", node_id, name)
 
+    def set_polling_interval(service):
+        """Adjust the polling interval."""
+        interval_milliseconds = service.data.get(CONF_POLLING_INTERVAL)
+        _set_polling_interval(interval_milliseconds)
+
     def set_config_parameter(service):
         """Set a config parameter to a node."""
         node_id = service.data.get(const.ATTR_NODE_ID)
@@ -537,13 +556,7 @@ def setup(hass, config):
             _LOGGER.info(
                 "final network state: %d %s", NETWORK.state, NETWORK.state_str)
 
-        polling_interval = convert(
-            config[DOMAIN].get(CONF_POLLING_INTERVAL), int)
-        if polling_interval is not None:
-            NETWORK.set_poll_interval(polling_interval, False)
-
-        poll_interval = NETWORK.get_poll_interval()
-        _LOGGER.info("zwave polling interval set to %d ms", poll_interval)
+        _set_polling_interval(config[DOMAIN].get(CONF_POLLING_INTERVAL))
 
         hass.bus.listen_once(EVENT_HOMEASSISTANT_STOP, stop_zwave)
 
@@ -574,6 +587,10 @@ def setup(hass, config):
         hass.services.register(DOMAIN, const.SERVICE_RENAME_NODE, rename_node,
                                descriptions[const.SERVICE_RENAME_NODE],
                                schema=RENAME_NODE_SCHEMA)
+        hass.services.register(DOMAIN, const.SERVICE_SET_POLLING_INTERVAL,
+                               set_polling_interval,
+                               descriptions[const.SERVICE_SET_POLLING_INTERVAL],
+                               schema=SET_POLLING_INTERVAL_SCHEMA)
         hass.services.register(DOMAIN, const.SERVICE_SET_CONFIG_PARAMETER,
                                set_config_parameter,
                                descriptions[

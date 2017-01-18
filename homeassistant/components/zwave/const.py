@@ -28,6 +28,7 @@ SERVICE_PRINT_CONFIG_PARAMETER = "print_config_parameter"
 SERVICE_STOP_NETWORK = "stop_network"
 SERVICE_START_NETWORK = "start_network"
 SERVICE_RENAME_NODE = "rename_node"
+SERVICE_SET_POLLING_INTERVAL = 'set_polling_interval'
 
 EVENT_SCENE_ACTIVATED = "zwave.scene_activated"
 EVENT_NODE_EVENT = "zwave.node_event"

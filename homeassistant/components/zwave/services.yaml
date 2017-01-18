@@ -68,3 +68,10 @@ rename_node:
     name:
       description: New Name
       example: 'kitchen'
+
+set_polling_interval:
+  description: Change how frequently the Z-wave network polls values that have been set to be polled. 
+  fields:
+    polling_interval:
+      description: Time in milliseconds to wait between polls. 
+      example: 5000
