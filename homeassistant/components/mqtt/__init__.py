@@ -63,6 +63,7 @@ CONF_PAYLOAD_AVAILABLE = 'payload_available'
 CONF_PAYLOAD_NOT_AVAILABLE = 'payload_not_available'
 CONF_QOS = 'qos'
 CONF_RETAIN = 'retain'
+CONF_RETRY_FIRST_CONNECTION = 'retry_first_connection'
 
 PROTOCOL_31 = '3.1'
 PROTOCOL_311 = '3.1.1'
@@ -77,6 +78,7 @@ DEFAULT_DISCOVERY_PREFIX = 'homeassistant'
 DEFAULT_TLS_PROTOCOL = 'auto'
 DEFAULT_PAYLOAD_AVAILABLE = 'online'
 DEFAULT_PAYLOAD_NOT_AVAILABLE = 'offline'
+DEFAULT_RETRY_FIRST_CONNECTION = False
 
 ATTR_TOPIC = 'topic'
 ATTR_PAYLOAD = 'payload'
@@ -142,6 +144,8 @@ CONFIG_SCHEMA = vol.Schema({
         vol.Optional(CONF_DISCOVERY, default=DEFAULT_DISCOVERY): cv.boolean,
         vol.Optional(CONF_DISCOVERY_PREFIX,
                      default=DEFAULT_DISCOVERY_PREFIX): valid_discovery_topic,
+        vol.Optional(CONF_RETRY_FIRST_CONNECTION,
+                     default=DEFAULT_RETRY_FIRST_CONNECTION): cv.boolean,
     }),
 }, extra=vol.ALLOW_EXTRA)
 
@@ -379,11 +383,13 @@ def async_setup(hass, config):
         else:
             tls_version = ssl.PROTOCOL_TLSv1
 
+    retry_first_connection = conf.get(CONF_RETRY_FIRST_CONNECTION)
+
     try:
         hass.data[DATA_MQTT] = MQTT(
             hass, broker, port, client_id, keepalive, username, password,
             certificate, client_key, client_cert, tls_insecure, protocol,
-            will_message, birth_message, tls_version)
+            will_message, birth_message, tls_version, retry_first_connection)
     except socket.error:
         _LOGGER.exception("Can't connect to the broker. "
                           "Please check your settings and the broker itself")
@@ -438,7 +444,7 @@ class MQTT(object):
     def __init__(self, hass, broker, port, client_id, keepalive, username,
                  password, certificate, client_key, client_cert,
                  tls_insecure, protocol, will_message, birth_message,
-                 tls_version):
+                 tls_version, retry_first_connection):
         """Initialize Home Assistant MQTT client."""
         import paho.mqtt.client as mqtt
 
@@ -452,6 +458,7 @@ class MQTT(object):
         self.birth_message = birth_message
         self._mqttc = None
         self._paho_lock = asyncio.Lock(loop=hass.loop)
+        self.retry_first_connection = retry_first_connection
 
         if protocol == PROTOCOL_31:
             proto = mqtt.MQTTv31
@@ -502,8 +509,16 @@ class MQTT(object):
 
         This method is a coroutine.
         """
+        if self.retry_first_connection:
+            def connect_method():
+                # always succeeds
+                self._mqttc.connect_async()
+                return 0
+        else:
+            connect_method = self._mqttc.connect
+
         result = yield from self.hass.async_add_job(
-            self._mqttc.connect, self.broker, self.port, self.keepalive)
+            connect_method, self.broker, self.port, self.keepalive)
 
         if result != 0:
             import paho.mqtt.client as mqtt
@@ -618,7 +633,8 @@ class MQTT(object):
 
         while True:
             try:
-                if self._mqttc.reconnect() == 0:
+                result_code = self._mqttc.reconnect()
+                if result_code == 0:
                     _LOGGER.info("Successfully reconnected to the MQTT server")
                     break
             except socket.error:
